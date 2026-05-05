@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# Pi secrets/history: never commit
+.auth.json
+auth.json
+sessions/
+.pi/agent/auth.json
+.pi/agent/sessions/
+config/auth.json
+config/sessions/
+
+# local env/secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# generated/local
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local Pi backups / old disabled experiments
+*.bak
+*.bak.*
+*.disabled
+*.disabled.*
+patches/backups/
+
+# editor
+.vscode/
+.idea/

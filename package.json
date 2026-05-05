@@ -1,0 +1,38 @@
+{
+  "name": "pi-agent-setup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Portable Pi agent extensions, skills, and setup config.",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  },
+  "scripts": {
+    "install:pi": "./install.sh",
+    "check:secrets": "git grep -n -I -E '(sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN ((RSA|OPENSSH|EC) )?PRIVATE KEY-----)' -- . || true"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.41",
+    "diff": "^5.2.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  }
+}
