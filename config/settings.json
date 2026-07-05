@@ -1,10 +1,44 @@
 {
-  "lastChangelogVersion": "0.70.0",
+  "lastChangelogVersion": "0.80.3",
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
   "transport": "auto",
   "packages": [
-    "npm:@plannotator/pi-extension"
-  ]
+    "npm:pi-subagents"
+  ],
+  "subagents": {
+    "agentOverrides": {
+      "scout": {
+        "model": "gpt-5.5",
+        "thinking": "medium"
+      },
+      "researcher": {
+        "model": "gpt-5.5",
+        "thinking": "medium"
+      },
+      "context-builder": {
+        "model": "gpt-5.5",
+        "thinking": "medium"
+      },
+      "planner": {
+        "model": "gpt-5.5",
+        "thinking": "high"
+      },
+      "worker": {
+        "model": "gpt-5.5",
+        "thinking": "medium"
+      },
+      "reviewer": {
+        "model": "gpt-5.5",
+        "thinking": "medium"
+      },
+      "oracle": {
+        "model": "gpt-5.5",
+        "thinking": "high"
+      }
+    }
+  },
+  "hideThinkingBlock": false,
+  "theme": "dark"
 }

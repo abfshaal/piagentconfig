@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
-import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
-import { Markdown, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { copyToClipboard, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { Markdown, matchesKey, type OverlayHandle, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 type AnyMessage = {
 	role?: string;
@@ -30,12 +30,30 @@ type Turn = {
 	toolResults: Array<{ name: string; text: string; isError?: boolean }>;
 };
 
+type FocusAwareOverlay = {
+	setOverlayFocused(focused: boolean): void;
+};
+
+type CopySelection = {
+	anchor: number;
+	cursor: number;
+};
+
+type TurnListRow = {
+	turnIndex: number;
+	plain: string;
+	display: string;
+};
+
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 const padRight = (text: string, width: number) => {
 	const visible = visibleWidth(text);
 	return text + " ".repeat(Math.max(0, width - visible));
 };
+
+const stripAnsiCodes = (value: string) =>
+	value.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
 const row = (theme: Theme, content: string, width: number) => {
 	const innerWidth = Math.max(1, width - 2);
@@ -275,10 +293,13 @@ const buildTurnMarkdown = (turn: Turn) => {
 	return sections.join("\n\n");
 };
 
-class TurnListOverlay {
+class TurnListOverlay implements FocusAwareOverlay {
 	private selected = 0;
 	private scroll = 0;
 	private pendingG = false;
+	private focused = false;
+	private copySelection?: CopySelection;
+	private copyStatus?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
@@ -286,13 +307,48 @@ class TurnListOverlay {
 		private turns: Turn[],
 		private theme: Theme,
 		private done: (turn: Turn | undefined) => void,
+		private toggleFocus: () => void,
 		initialSelected = 0,
 	) {
 		this.selected = clamp(initialSelected, 0, Math.max(0, turns.length - 1));
 		this.ensureVisible();
 	}
 
+	setOverlayFocused(focused: boolean): void {
+		this.focused = focused;
+		this.invalidate();
+	}
+
 	handleInput(data: string): void {
+		if (matchesKey(data, "ctrl+x")) {
+			this.toggleFocus();
+			return;
+		}
+		if (this.copySelection) {
+			if (matchesKey(data, "escape") || data === "q") {
+				this.copySelection = undefined;
+				this.copyStatus = undefined;
+				this.invalidate();
+				return;
+			}
+			if (data === "Y") {
+				this.copySelectedRows();
+				return;
+			}
+			if (matchesKey(data, "up")) {
+				this.moveCopyCursor(-1);
+				return;
+			}
+			if (matchesKey(data, "down")) {
+				this.moveCopyCursor(1);
+				return;
+			}
+			return;
+		}
+		if (data === "v") {
+			this.startCopy();
+			return;
+		}
 		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "h") {
 			this.done(undefined);
 			return;
@@ -336,21 +392,19 @@ class TurnListOverlay {
 
 		const lines: string[] = [];
 		lines.push(border(th, "╭", "─", "╮", w));
-		lines.push(row(th, ` ${th.fg("accent", th.bold("Turns"))} ${th.fg("dim", `${this.turns.length} prompts`)}`, w));
+		const focusLabel = this.focused ? "focused" : "typing focus";
+		lines.push(row(th, ` ${th.fg("accent", th.bold("Turns"))} ${th.fg("dim", `${this.turns.length} prompts • ${focusLabel}`)}`, w));
 		lines.push(row(th, "", w));
 
 		if (this.turns.length === 0) {
 			lines.push(row(th, ` ${th.fg("warning", "No user prompts in current branch yet.")}`, w));
 		} else {
-			const visible = this.turns.slice(this.scroll, this.scroll + bodyRows);
-			for (const turn of visible) {
-				const selected = turn.index - 1 === this.selected;
-				const prefix = selected ? th.fg("accent", "▶") : " ";
-				const toolCount = turn.toolCalls.length;
-				const answer = turn.assistantText.trim() ? th.fg("success", "✓") : th.fg("dim", "…");
-				const meta = `${answer} ${toolCount ? th.fg("muted", `${toolCount} tools`) : th.fg("dim", "no tools")}`;
-				const label = selected ? th.fg("accent", turnTitle(turn)) : th.fg("text", turnTitle(turn));
-				lines.push(row(th, ` ${prefix} ${String(turn.index).padStart(2, "0")} ${label} ${th.fg("dim", "·")} ${meta}`, w));
+			const rows = this.buildListRows(Math.max(1, w - 2));
+			const visible = rows.slice(this.scroll, this.scroll + bodyRows);
+			for (const listRow of visible) {
+				const selected = this.isCopySelected(listRow.turnIndex);
+				const content = selected ? `\x1b[7m${listRow.display}\x1b[27m` : listRow.display;
+				lines.push(row(th, content, w));
 			}
 		}
 
@@ -358,7 +412,10 @@ class TurnListOverlay {
 		const moreTop = this.scroll > 0 ? `↑ ${this.scroll} ` : "";
 		const below = Math.max(0, this.turns.length - (this.scroll + bodyRows));
 		const moreBottom = below > 0 ? `↓ ${below} ` : "";
-		lines.push(row(th, ` ${th.fg("dim", `${moreTop}${moreBottom}j/k move • Ctrl-d/u half • gg/G top/end • l open • h/q close`)}`, w));
+		const status = this.copySelection
+			? "COPY • ↑↓ select • Y yank • Esc/q cancel"
+			: (this.copyStatus ?? "Ctrl-x focus/type • j/k move • Ctrl-d/u half • l open • h/q close");
+		lines.push(row(th, ` ${th.fg("dim", `${moreTop}${moreBottom}${status}`)}`, w));
 		lines.push(border(th, "╰", "─", "╯", w));
 
 		this.cachedWidth = width;
@@ -373,7 +430,8 @@ class TurnListOverlay {
 
 	private visibleRows(): number {
 		const rows = process.stdout.rows || 30;
-		return clamp(rows - 10, 6, 24);
+		const overlayRows = Math.max(12, Math.floor(rows * 0.6));
+		return Math.max(6, overlayRows - 6);
 	}
 
 	private ensureVisible(): void {
@@ -382,23 +440,130 @@ class TurnListOverlay {
 		if (this.selected >= this.scroll + rows) this.scroll = this.selected - rows + 1;
 		this.scroll = clamp(this.scroll, 0, Math.max(0, this.turns.length - rows));
 	}
+
+	private buildListRows(width: number): TurnListRow[] {
+		return this.turns.map((turn) => {
+			const selected = turn.index - 1 === this.selected;
+			const prefix = selected ? this.theme.fg("accent", "▶") : " ";
+			const index = String(turn.index).padStart(2, "0");
+			const toolCount = turn.toolCalls.length;
+			const answerPlain = turn.assistantText.trim() ? "✓" : "…";
+			const toolsPlain = toolCount ? `${toolCount} tools` : "no tools";
+			const statusPlain = `${answerPlain} ${toolsPlain}`;
+			const plainPrefix = `Turn ${index}: `;
+			const plainSuffix = ` · ${statusPlain}`;
+			const titleWidth = Math.max(1, width - visibleWidth(plainPrefix) - visibleWidth(plainSuffix));
+			const title = truncateToWidth(turnTitle(turn), titleWidth, "…");
+			const answer = turn.assistantText.trim() ? this.theme.fg("success", "✓") : this.theme.fg("dim", "…");
+			const meta = `${answer} ${toolCount ? this.theme.fg("muted", `${toolCount} tools`) : this.theme.fg("dim", "no tools")}`;
+			const label = selected ? this.theme.fg("accent", title) : this.theme.fg("text", title);
+			const plain = truncateToWidth(`${plainPrefix}${title}${plainSuffix}`, width, "…");
+			return {
+				turnIndex: turn.index - 1,
+				plain,
+				display: ` ${prefix} ${index} ${label} ${this.theme.fg("dim", "·")} ${meta}`,
+			};
+		});
+	}
+
+	private startCopy(): void {
+		if (this.turns.length === 0) {
+			this.copyStatus = "No turn rows to copy";
+			this.invalidate();
+			return;
+		}
+		this.copySelection = { anchor: this.selected, cursor: this.selected };
+		this.copyStatus = undefined;
+		this.ensureVisible();
+		this.invalidate();
+	}
+
+	private moveCopyCursor(delta: number): void {
+		if (!this.copySelection || this.turns.length === 0) return;
+		this.copySelection.cursor = clamp(this.copySelection.cursor + delta, 0, this.turns.length - 1);
+		this.selected = this.copySelection.cursor;
+		this.ensureVisible();
+		this.invalidate();
+	}
+
+	private copySelectedRows(): void {
+		if (!this.copySelection) return;
+		const [start, end] = this.copyRange();
+		const width = Math.max(1, Math.max(40, this.cachedWidth ?? 80) - 2);
+		const rows = this.buildListRows(width).slice(start, end + 1);
+		void copyToClipboard(rows.map((listRow) => listRow.plain).join("\n"));
+		this.copySelection = undefined;
+		this.copyStatus = `Copied ${rows.length} line(s)`;
+		this.invalidate();
+	}
+
+	private copyRange(): [number, number] {
+		if (!this.copySelection) return [0, -1];
+		return [Math.min(this.copySelection.anchor, this.copySelection.cursor), Math.max(this.copySelection.anchor, this.copySelection.cursor)];
+	}
+
+	private isCopySelected(index: number): boolean {
+		if (!this.copySelection) return false;
+		const [start, end] = this.copyRange();
+		return index >= start && index <= end;
+	}
 }
 
-class TurnViewerOverlay {
+class TurnViewerOverlay implements FocusAwareOverlay {
 	private scroll = 0;
 	private pendingG = false;
+	private focused = false;
+	private copySelection?: CopySelection;
+	private copyStatus?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 	private cachedBodyWidth?: number;
 	private renderedBody?: string[];
+	private plainBody?: string[];
+	private bodyHasContent = true;
 
 	constructor(
 		private turn: Turn,
 		private theme: Theme,
 		private done: (action: "back" | "close") => void,
+		private toggleFocus: () => void,
 	) {}
 
+	setOverlayFocused(focused: boolean): void {
+		this.focused = focused;
+		this.invalidate();
+	}
+
 	handleInput(data: string): void {
+		if (matchesKey(data, "ctrl+x")) {
+			this.toggleFocus();
+			return;
+		}
+		if (this.copySelection) {
+			if (matchesKey(data, "escape") || data === "q") {
+				this.copySelection = undefined;
+				this.copyStatus = undefined;
+				this.invalidate();
+				return;
+			}
+			if (data === "Y") {
+				this.copySelectedRows();
+				return;
+			}
+			if (matchesKey(data, "up")) {
+				this.moveCopyCursor(-1);
+				return;
+			}
+			if (matchesKey(data, "down")) {
+				this.moveCopyCursor(1);
+				return;
+			}
+			return;
+		}
+		if (data === "v") {
+			this.startCopy();
+			return;
+		}
 		const page = this.visibleBodyRows();
 		const halfPage = Math.max(1, Math.floor(page / 2));
 		if (matchesKey(data, "escape") || data === "h") {
@@ -444,23 +609,28 @@ class TurnViewerOverlay {
 
 		const lines: string[] = [];
 		lines.push(border(th, "╭", "─", "╮", w));
-		lines.push(row(th, ` ${th.fg("accent", th.bold(`Turn ${this.turn.index}`))} ${th.fg("dim", turnTitle(this.turn))}`, w));
-		lines.push(row(th, "", w));
-
-		for (const line of visible) {
-			lines.push(row(th, ` ${line}`, w));
-		}
-
-		while (visible.length < bodyRows) {
-			visible.push("");
-			lines.push(row(th, "", w));
-		}
-
-		lines.push(row(th, "", w));
+		const focusLabel = this.focused ? "pane focused" : "typing focused";
+		lines.push(row(th, ` ${th.fg(this.focused ? "success" : "warning", th.bold(`Assistant Response (${focusLabel})`))}`, w));
+		lines.push(row(th, ` ${th.fg("muted", `turn ${this.turn.index}: ${turnTitle(this.turn)}`)}`, w));
 		const above = this.scroll > 0 ? `↑ ${this.scroll} ` : "";
 		const below = Math.max(0, body.length - (this.scroll + bodyRows));
 		const belowText = below > 0 ? `↓ ${below} ` : "";
-		lines.push(row(th, ` ${th.fg("dim", `${above}${belowText}j/k scroll • Ctrl-d/u half • gg/G top/end • h back • q close`)}`, w));
+		const help = this.copySelection
+			? "COPY • ↑↓ select • Y yank • Esc/q cancel"
+			: (this.copyStatus ?? "Ctrl-x focus/type • v copy • ↑↓/j/k scroll • PgUp/PgDn/Ctrl-d/u page • h back • q close");
+		lines.push(row(th, ` ${th.fg("dim", `${above}${belowText}${help}`)}`, w));
+		lines.push(border(th, "├", "─", "┤", w));
+
+		for (let index = 0; index < bodyRows; index++) {
+			const bodyIndex = this.scroll + index;
+			const line = visible[index] ?? "";
+			const content = this.isCopySelected(bodyIndex) ? `\x1b[7m ${line}\x1b[27m` : ` ${line}`;
+			lines.push(row(th, content, w));
+		}
+
+		lines.push(border(th, "├", "─", "┤", w));
+		const copyInfo = this.copySelection ? ` • copy ${Math.abs(this.copySelection.cursor - this.copySelection.anchor) + 1} line(s)` : "";
+		lines.push(row(th, ` ${th.fg("dim", `rendered markdown • line ${Math.min(this.scroll + 1, body.length || 1)}-${Math.min(this.scroll + bodyRows, body.length)} of ${body.length || 1}${copyInfo}`)}`, w));
 		lines.push(border(th, "╰", "─", "╯", w));
 
 		this.cachedWidth = width;
@@ -475,7 +645,8 @@ class TurnViewerOverlay {
 
 	private visibleBodyRows(): number {
 		const rows = process.stdout.rows || 34;
-		return clamp(rows - 9, 8, 34);
+		const overlayRows = Math.max(14, Math.floor(rows * 0.6));
+		return Math.max(8, overlayRows - 8);
 	}
 
 	private getBodyLines(width: number): string[] {
@@ -483,19 +654,111 @@ class TurnViewerOverlay {
 		const markdown = new Markdown(enhanceMermaidBlocks(buildTurnMarkdown(this.turn)), 0, 0, getMarkdownTheme());
 		const rendered = markdown.render(width).map((line) => truncateToWidth(line, width, "…"));
 		this.cachedBodyWidth = width;
-		this.renderedBody = rendered.length > 0 ? rendered : [this.theme.fg("dim", "No content")];
+		this.bodyHasContent = rendered.length > 0;
+		this.renderedBody = this.bodyHasContent ? rendered : [this.theme.fg("dim", "No content")];
+		this.plainBody = this.bodyHasContent ? rendered.map((line) => stripAnsiCodes(line).replace(/[ \t]+$/g, "")) : [];
 		return this.renderedBody;
+	}
+
+	private getPlainBodyLines(width: number): string[] {
+		if (!this.plainBody || this.cachedBodyWidth !== width) this.getBodyLines(width);
+		return this.plainBody ?? [];
+	}
+
+	private startCopy(): void {
+		const width = this.cachedBodyWidth ?? 80;
+		const plain = this.getPlainBodyLines(width);
+		if (!this.bodyHasContent || plain.length === 0) {
+			this.copyStatus = "No content rows to copy";
+			this.invalidate();
+			return;
+		}
+		const maxScroll = Math.max(0, plain.length - this.visibleBodyRows());
+		this.scroll = clamp(this.scroll, 0, maxScroll);
+		this.copySelection = { anchor: this.scroll, cursor: this.scroll };
+		this.copyStatus = undefined;
+		this.invalidate();
+	}
+
+	private moveCopyCursor(delta: number): void {
+		if (!this.copySelection) return;
+		const width = this.cachedBodyWidth ?? 80;
+		const body = this.getPlainBodyLines(width);
+		if (body.length === 0) return;
+		const page = this.visibleBodyRows();
+		this.copySelection.cursor = clamp(this.copySelection.cursor + delta, 0, body.length - 1);
+		if (this.copySelection.cursor < this.scroll) this.scroll = this.copySelection.cursor;
+		if (this.copySelection.cursor >= this.scroll + page) this.scroll = this.copySelection.cursor - page + 1;
+		this.scroll = clamp(this.scroll, 0, Math.max(0, body.length - page));
+		this.invalidate();
+	}
+
+	private copySelectedRows(): void {
+		if (!this.copySelection) return;
+		const width = this.cachedBodyWidth ?? 80;
+		const body = this.getPlainBodyLines(width);
+		const [start, end] = this.copyRange();
+		const rows = body.slice(start, end + 1);
+		void copyToClipboard(rows.join("\n"));
+		this.copySelection = undefined;
+		this.copyStatus = `Copied ${rows.length} line(s)`;
+		this.invalidate();
+	}
+
+	private copyRange(): [number, number] {
+		if (!this.copySelection) return [0, -1];
+		return [Math.min(this.copySelection.anchor, this.copySelection.cursor), Math.max(this.copySelection.anchor, this.copySelection.cursor)];
+	}
+
+	private isCopySelected(index: number): boolean {
+		if (!this.copySelection) return false;
+		const [start, end] = this.copyRange();
+		return index >= start && index <= end;
 	}
 }
 
-const showTurnViewer = async (ctx: ExtensionContext, turn: Turn) =>
-	ctx.ui.custom<"back" | "close">(
-		(_tui, theme, _keybindings, done) => new TurnViewerOverlay(turn, theme, done),
+let activeTurnsOverlay: { handle?: OverlayHandle; component?: FocusAwareOverlay } | undefined;
+
+const toggleActiveTurnsFocus = () => {
+	const active = activeTurnsOverlay;
+	if (!active?.handle) return;
+	if (active.handle.isFocused()) {
+		active.component?.setOverlayFocused(false);
+		active.handle.unfocus();
+		return;
+	}
+	active.component?.setOverlayFocused(true);
+	active.handle.focus();
+};
+
+const turnOverlayOptions = {
+	width: "100%",
+	maxHeight: "65%",
+	anchor: "top-center" as const,
+	margin: { top: 1, right: 1, bottom: 8, left: 1 },
+	nonCapturing: true,
+};
+
+const showTurnViewer = async (ctx: ExtensionContext, turn: Turn) => {
+	let component: TurnViewerOverlay | undefined;
+	const result = await ctx.ui.custom<"back" | "close">(
+		(_tui, theme, _keybindings, done) => {
+			component = new TurnViewerOverlay(turn, theme, done, toggleActiveTurnsFocus);
+			return component;
+		},
 		{
 			overlay: true,
-			overlayOptions: { width: "92%", minWidth: 70, maxHeight: "94%", anchor: "center", margin: 1 },
+			overlayOptions: turnOverlayOptions,
+			onHandle: (handle) => {
+				activeTurnsOverlay = { handle, component };
+				component?.setOverlayFocused(true);
+				handle.focus();
+			},
 		},
 	);
+	if (activeTurnsOverlay?.component === component) activeTurnsOverlay = undefined;
+	return result;
+};
 
 const showTurnsOverlay = async (ctx: ExtensionContext, startMostRecent = true) => {
 	if (!ctx.hasUI) return;
@@ -514,13 +777,23 @@ const showTurnsOverlay = async (ctx: ExtensionContext, startMostRecent = true) =
 
 	let keepOpen = true;
 	while (keepOpen) {
+		let component: TurnListOverlay | undefined;
 		const selected = await ctx.ui.custom<Turn | undefined>(
-			(_tui, theme, _keybindings, done) => new TurnListOverlay(turns, theme, done, selectedIndex),
+			(_tui, theme, _keybindings, done) => {
+				component = new TurnListOverlay(turns, theme, done, toggleActiveTurnsFocus, selectedIndex);
+				return component;
+			},
 			{
 				overlay: true,
-				overlayOptions: { width: "88%", minWidth: 60, maxHeight: "90%", anchor: "center", margin: 1 },
+				overlayOptions: turnOverlayOptions,
+				onHandle: (handle) => {
+					activeTurnsOverlay = { handle, component };
+					component?.setOverlayFocused(true);
+					handle.focus();
+				},
 			},
 		);
+		if (activeTurnsOverlay?.component === component) activeTurnsOverlay = undefined;
 
 		if (!selected) break;
 		selectedIndex = selected.index - 1;
@@ -537,7 +810,13 @@ export default function turnsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerShortcut("ctrl+x", {
-		description: "Show turns overlay",
-		handler: showTurnsOverlay,
+		description: "Show/focus turns overlay",
+		handler: (ctx) => {
+			if (activeTurnsOverlay?.handle && !activeTurnsOverlay.handle.isHidden()) {
+				toggleActiveTurnsFocus();
+				return;
+			}
+			void showTurnsOverlay(ctx);
+		},
 	});
 }

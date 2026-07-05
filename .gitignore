@@ -1,38 +1,23 @@
-# dependencies
+# Dependencies / generated installs
 node_modules/
-.pnpm-store/
+npm/
+git/
 
-# Pi secrets/history: never commit
-.auth.json
+# Pi secrets and local-only state
 auth.json
+trust.json
+run-history.jsonl
 sessions/
-.pi/agent/auth.json
-.pi/agent/sessions/
-config/auth.json
-config/sessions/
-
-# local env/secrets
 .env
 .env.*
-*.pem
-*.key
-*.p12
-*.pfx
 
-# generated/local
-.DS_Store
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# local Pi backups / old disabled experiments
+# Backups / temporary files
 *.bak
 *.bak.*
 *.disabled
 *.disabled.*
-patches/backups/
+backups/
+.DS_Store
+*.log
 
-# editor
-.vscode/
-.idea/
+# Keep repo content, config examples, package-locks, scripts, prompts, skills, agents.

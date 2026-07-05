@@ -1,16 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NOTE: this patches pi's bundled pi-tui in place. It breaks (exits 1, no harm done)
+# whenever a pi update reformats markdown.js — rerun after every pi update.
 GLOBAL_ROOT="$(npm root -g)"
-TARGET="$GLOBAL_ROOT/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-tui/dist/components/markdown.js"
+TARGET=""
+for SCOPE in "@earendil-works" "@mariozechner"; do
+  CANDIDATE="$GLOBAL_ROOT/$SCOPE/pi-coding-agent/node_modules/$SCOPE/pi-tui/dist/components/markdown.js"
+  if [[ -f "$CANDIDATE" ]]; then
+    TARGET="$CANDIDATE"
+    break
+  fi
+done
 BACKUP_DIR="$HOME/.pi/agent/patches/backups"
 ORIGINAL="$BACKUP_DIR/markdown.js.original"
 STAMPED="$BACKUP_DIR/markdown.js.$(date +%Y%m%d%H%M%S).bak"
 
-if [[ ! -f "$TARGET" ]]; then
-  echo "Target not found: $TARGET" >&2
+if [[ -z "$TARGET" ]]; then
+  echo "Target markdown.js not found under @earendil-works or @mariozechner in $GLOBAL_ROOT" >&2
   exit 1
 fi
+
+# keep only the most recent stamped backup to avoid accumulation
+ls -1t "$BACKUP_DIR"/markdown.js.*.bak 2>/dev/null | tail -n +2 | xargs rm -f 2>/dev/null || true
 
 mkdir -p "$BACKUP_DIR"
 cp "$TARGET" "$STAMPED"

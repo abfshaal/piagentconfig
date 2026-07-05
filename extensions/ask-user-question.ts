@@ -537,6 +537,20 @@ function withUILock<T>(fn: () => Promise<T>): Promise<T> {
 	return prev.then(fn).finally(() => release!());
 }
 
+function emitHerdrBlocked(pi: ExtensionAPI, active: boolean, label?: string): void {
+	try {
+		pi.events.emit("herdr:blocked", { active, label });
+	} catch {
+		// Herdr integration is optional. Ignore when unavailable.
+	}
+}
+
+function questionLabel(mode: AskUserQuestionMode): string {
+	if (mode === "multi-select") return "waiting for multi-select answer";
+	if (mode === "single-select") return "waiting for choice";
+	return "waiting for answer";
+}
+
 export default function askUserQuestion(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "ask_user_question",
@@ -570,30 +584,35 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 			}
 
 			return withUILock(async () => {
-				if (mode === "text") {
-					const editorTitle = context ? `${params.question}\n\n${context}` : params.question;
-					const answer = await ctx.ui.editor(editorTitle);
-					if (answer === undefined) {
+				emitHerdrBlocked(pi, true, questionLabel(mode));
+				try {
+					if (mode === "text") {
+						const editorTitle = context ? `${params.question}\n\n${context}` : params.question;
+						const answer = await ctx.ui.editor(editorTitle);
+						if (answer === undefined) {
+							return cancelledResult(params.question, mode, context);
+						}
+						return buildResult(params.question, context, mode, [
+							{ type: "text", label: answer.trim(), value: answer.trim() },
+						]);
+					}
+
+					if (mode === "single-select") {
+						const answer = await askSingleChoice(ctx, params.question, context, options);
+						if (!answer) {
+							return cancelledResult(params.question, mode, context);
+						}
+						return buildResult(params.question, context, mode, [answer]);
+					}
+
+					const answers = await askMultiChoice(ctx, params.question, context, options);
+					if (!answers) {
 						return cancelledResult(params.question, mode, context);
 					}
-					return buildResult(params.question, context, mode, [
-						{ type: "text", label: answer.trim(), value: answer.trim() },
-					]);
+					return buildResult(params.question, context, mode, answers);
+				} finally {
+					emitHerdrBlocked(pi, false);
 				}
-
-				if (mode === "single-select") {
-					const answer = await askSingleChoice(ctx, params.question, context, options);
-					if (!answer) {
-						return cancelledResult(params.question, mode, context);
-					}
-					return buildResult(params.question, context, mode, [answer]);
-				}
-
-				const answers = await askMultiChoice(ctx, params.question, context, options);
-				if (!answers) {
-					return cancelledResult(params.question, mode, context);
-				}
-				return buildResult(params.question, context, mode, answers);
 			});
 		},
 

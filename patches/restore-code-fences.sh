@@ -2,13 +2,20 @@
 set -euo pipefail
 
 GLOBAL_ROOT="$(npm root -g)"
-TARGET="$GLOBAL_ROOT/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-tui/dist/components/markdown.js"
+TARGET=""
+for SCOPE in "@earendil-works" "@mariozechner"; do
+  CANDIDATE="$GLOBAL_ROOT/$SCOPE/pi-coding-agent/node_modules/$SCOPE/pi-tui/dist/components/markdown.js"
+  if [[ -f "$CANDIDATE" ]]; then
+    TARGET="$CANDIDATE"
+    break
+  fi
+done
 BACKUP_DIR="$HOME/.pi/agent/patches/backups"
 ORIGINAL="$BACKUP_DIR/markdown.js.original"
 BACKUP_TO_RESTORE="${1:-$ORIGINAL}"
 
-if [[ ! -f "$TARGET" ]]; then
-  echo "Target not found: $TARGET" >&2
+if [[ -z "$TARGET" ]]; then
+  echo "Target markdown.js not found under @earendil-works or @mariozechner in $GLOBAL_ROOT" >&2
   exit 1
 fi
 if [[ ! -f "$BACKUP_TO_RESTORE" ]]; then
